@@ -62,6 +62,7 @@
   .k-sub { font-size:14px; color:var(--mute); margin-top:2px; }
   .k-harga { font-size:38px; font-weight:800; color:#1a3c5e; line-height:1.15; margin-top:4px; }
   .k-harga.kosong { font-size:18px; color:var(--warn); }
+  .k-harga.kira { color:var(--warn); }
   .k-daftar { list-style:none; margin:10px 0 0; padding:0; font-size:14px; }
   .k-daftar li { display:flex; justify-content:space-between; gap:8px; padding:5px 0; border-bottom:1px solid #eef3f6; }
   .k-daftar li span:first-child { flex:1; }
@@ -139,6 +140,7 @@ var CFG = {
   MOVE: 7,               // selisih rata-rata antar-frame yang dianggap "bergerak"
   STEADY_MS: 1000,       // harus diam selama ini sebelum diambil
   MIN_CONTRAST: 16,      // di bawah ini dianggap meja kosong / tidak ada obat
+  NEW_OBJ: 32,           // selisih terhadap foto terakhir yang dianggap obat BERBEDA (tanpa meja dikosongkan)
   MIN_GAP_MS: 3000       // jarak minimum antar pengiriman
 };
 function meanAbsDiff(a, b) { var s = 0; for (var i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; }
@@ -148,26 +150,29 @@ function contrastOf(a) {
   return Math.sqrt(v / a.length);
 }
 function createDetector(cfg) {
-  var prev = null, stable = 0, siap = true, lastSend = -1e9;   // siap = boleh memindai lagi (hanya setelah meja kosong)
+  var prev = null, stable = 0, lastSent = null, lastSend = -1e9, kosongSejak = true;
   function copy(x) { return Array.prototype.slice.call(x); }
   return {
     // th: gambar kecil (array 0-255); now: ms; busy: sedang mengirim?
+    // info.kosongSejak (saat action = "capture"): apakah meja sudah terlihat KOSONG sejak pindai sebelumnya.
+    // Dikirim ke server: bila false dan obat yang terbaca sama dengan sebelumnya → dianggap dobel (tidak otomatis masuk stok).
     feed: function (th, now, busy) {
       var diff = prev ? meanAbsDiff(th, prev) : 999;
       prev = copy(th);
       stable = diff > cfg.MOVE ? 0 : stable + cfg.SAMPLE_MS;
       var c = contrastOf(th);
-      var info = { stable: stable, contrast: c, action: null, kosong: false };
+      var info = { stable: stable, contrast: c, action: null, kosong: false, kosongSejak: kosongSejak };
       if (stable >= cfg.STEADY_MS) {
         if (c < cfg.MIN_CONTRAST) {            // meja kosong → siap menerima obat berikutnya (juga obat yang sama)
-          siap = true; info.kosong = true;
-        } else if (siap && !busy && now - lastSend >= cfg.MIN_GAP_MS) {
-          info.action = "capture"; siap = false; lastSend = now;   // satu kali per penaruhan; obat digeser/diputar TIDAK dihitung lagi
+          lastSent = null; kosongSejak = true; info.kosong = true;
+        } else if (!busy && now - lastSend >= cfg.MIN_GAP_MS) {
+          var d = lastSent ? meanAbsDiff(th, lastSent) : 999;
+          if (d > cfg.NEW_OBJ) { info.action = "capture"; info.kosongSejak = kosongSejak; lastSent = copy(th); lastSend = now; kosongSejak = false; }
         }
       }
       return info;
     },
-    paksa: function (th, now) { siap = false; lastSend = now; }   // tombol "Ambil sekarang"
+    paksa: function (th, now) { lastSent = copy(th); lastSend = now; kosongSejak = false; }   // tombol "Ambil sekarang"
   };
 }
 // </detektor>
@@ -218,17 +223,22 @@ function createDetector(cfg) {
   function tampilKasir(items) {
     var ada = false;
     (items || []).forEach(function (it) {
-      if (!it.pasti) { // nama belum pasti → jangan sebut harga
-        $("kNama").textContent = it.nama; $("kSub").textContent = "Obat belum dipastikan — cek di Antrian Foto";
-        $("kHarga").textContent = "harga belum pasti"; $("kHarga").className = "k-harga kosong"; ada = true; return;
+      var kira = !it.pasti && it.kira;                    // obat belum pasti, tapi ada perkiraan dari nama yang disarankan
+      var nama = it.pasti ? (it.cocok || it.nama) : (it.namaKira || it.nama);
+      $("kNama").textContent = (kira ? "≈ " : "") + nama;
+      if (it.dobel) {
+        $("kSub").textContent = "Obat sama terbaca lagi tanpa diangkat — dikira dobel, TIDAK ditambahkan. Pakai tombol Ambil sekarang bila memang dibeli lagi.";
+        $("kHarga").textContent = "tidak dihitung"; $("kHarga").className = "k-harga kosong"; ada = true; return;
       }
-      $("kNama").textContent = it.cocok || it.nama;
       if (it.harga > 0) {
-        keranjang.push({ nama: it.cocok || it.nama, jumlah: it.jumlah, harga: it.harga, total: it.total });
-        $("kSub").textContent = it.jumlah + " × " + rp(it.harga);
-        $("kHarga").textContent = rp(it.total); $("kHarga").className = "k-harga";
-      } else {
+        keranjang.push({ nama: (kira ? "≈ " : "") + nama, jumlah: it.jumlah, harga: it.harga, total: it.total });
+        $("kSub").textContent = (kira ? "PERKIRAAN — cek nama obat di Antrian Foto · " : "") + it.jumlah + " × " + rp(it.harga);
+        $("kHarga").textContent = rp(it.total); $("kHarga").className = "k-harga" + (kira ? " kira" : "");
+      } else if (it.pasti || kira) {
         $("kSub").textContent = it.jumlah + " barang"; $("kHarga").textContent = "harga jual belum diisi"; $("kHarga").className = "k-harga kosong";
+      } else {
+        $("kSub").textContent = "Obat tidak dikenali — pilih manual di Antrian Foto";
+        $("kHarga").textContent = "harga belum ada"; $("kHarga").className = "k-harga kosong";
       }
       ada = true;
     });
@@ -315,7 +325,7 @@ function createDetector(cfg) {
     var info = det.feed(th, Date.now(), sibuk);
     $("progres").style.width = Math.min(100, Math.round(info.stable / CFG.STEADY_MS * 100)) + "%";
     if (sibuk) return;
-    if (info.action === "capture") { ambilDanKirim(); return; }
+    if (info.action === "capture") { ambilDanKirim(info.kosongSejak); return; }
     if (info.kosong) { frame(""); pesan("Siap — arahkan obat ke kamera"); }
     else if (info.stable >= CFG.STEADY_MS) { pesan("Sudah dipindai ✔ — angkat obat untuk lanjut"); }
     else if (info.stable > 0 && info.contrast >= CFG.MIN_CONTRAST) { frame("steady"); pesan("Tahan diam…"); }
@@ -329,16 +339,16 @@ function createDetector(cfg) {
     return c.toDataURL("image/jpeg", 0.8).split(",")[1];
   }
 
-  function ambilDanKirim() {
+  function ambilDanKirim(kosongSejak) {
     if (sibuk || !video.videoWidth) return;
     sibuk = true; urutan++;
     var no = urutan, mulai = Date.now();
     frame("baca"); pesan("Membaca obat…");
     var qty = parseInt($("qty").value, 10) || 0;
-    kirim({ pin: $("pin").value || baca("pin"), mode: mode, base64: ambilGambar(), mime: "image/jpeg", qty: qty })
+    kirim({ pin: $("pin").value || baca("pin"), mode: mode, base64: ambilGambar(), mime: "image/jpeg", qty: qty, kosong: kosongSejak !== false })
       .then(function (r) {
         var dt = ((Date.now() - mulai) / 1000).toFixed(1), adaOto = false, adaMasalah = !r.ok;
-        var h = '<div class="hasil"><b>#' + no + ' ' + (mode === "MASUK" ? "masuk" : "keluar") + ':</b> <span class="' + (r.ok ? "ok" : "err") + '">' + esc(r.pesan) + '</span> <span class="tag">' + dt + ' dtk</span>';
+        var h = '<div class="hasil"><b>#' + no + ' ' + (mode === "MASUK" ? "masuk" : "keluar") + ':</b> <span class="' + (r.ok ? "ok" : "err") + '">' + esc(r.pesan) + '</span> <span class="tag">' + dt + ' dtk' + (r.waktu ? ' · AI ' + (r.waktu.gemini / 1000).toFixed(1) + ' · Drive ' + (r.waktu.drive / 1000).toFixed(1) + ' · Sheet ' + (((r.waktu.baca || 0) + (r.waktu.sheet || 0)) / 1000).toFixed(1) + ' · kirim/terima ' + Math.max(0, dt - r.waktu.total / 1000).toFixed(1) : '') + '</span>';
         (r.items || []).forEach(function (it) {
           var terapkan = it.status === "✔ Diterapkan";
           if (terapkan) adaOto = true; else adaMasalah = true;
@@ -362,7 +372,7 @@ function createDetector(cfg) {
       .then(function () { sibuk = false; });
   }
 
-  $("btnAmbil").onclick = function () { if (thTerakhir) det.paksa(thTerakhir, Date.now()); ambilDanKirim(); };
+  $("btnAmbil").onclick = function () { if (thTerakhir) det.paksa(thTerakhir, Date.now()); ambilDanKirim(true); };   // tombol manual = kehendak kasir, tanpa penjaga dobel
   $("btnJeda").onclick = function () { jeda = !jeda; $("btnJeda").textContent = jeda ? "▶ Lanjut" : "⏸ Jeda"; if (!jeda) pesan("Arahkan obat ke kamera"); };
 
   setMode("KELUAR"); tampilHitung(); mulaiKamera();
