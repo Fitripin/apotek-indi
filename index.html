@@ -99,6 +99,22 @@
     <button id="mMasuk"  class="masuk"     type="button">📥 Stok Masuk<small>faktur PBF</small></button>
   </div>
 
+  <div class="card" id="boxImpor" style="display:none">
+    <b style="font-size:15px">📥 Faktur PBF — impor foto</b>
+    <div style="font-size:12px;color:var(--mute);line-height:1.5;margin:6px 0 8px">
+      Foto faktur dulu pakai kamera HP, lalu pilih fotonya di sini (bisa beberapa sekaligus).<br>
+      <b>Faktur panjang:</b> foto per bagian dari atas ke bawah, <b>tumpang tindih sedikit</b>. Ratakan kertas, cahaya dari samping, foto <b>tegak</b>.
+    </div>
+    <label style="display:flex;gap:8px;align-items:flex-start;font-size:14px;margin:6px 0 10px">
+      <input id="gabung" type="checkbox" checked style="margin-top:3px;width:18px;height:18px">
+      <span>Foto yang dipilih = <b>satu faktur</b> (digabung, maks 6)</span></label>
+    <label class="btn" for="fImpor" style="display:block;text-align:center;margin:0">🖼️ Impor foto faktur</label>
+    <input id="fImpor" type="file" accept="image/*" multiple style="display:none">
+    <div id="impThumbs" style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0"></div>
+    <button id="impKirim" class="btn" type="button" style="width:100%" disabled>Kirim faktur</button>
+    <div id="impStatus" style="font-size:13px;margin-top:6px;color:var(--mute)"></div>
+  </div>
+
   <div class="row">
     <div class="qty" id="boxQty">Jumlah per pindai:
       <input id="qty" type="number" inputmode="numeric" min="1" placeholder="auto"></div>
@@ -262,6 +278,9 @@ function createDetector(cfg) {
     mode = m; $("mKeluar").classList.toggle("on", m === "KELUAR"); $("mMasuk").classList.toggle("on", m === "MASUK");
     $("boxQty").style.display = m === "KELUAR" ? "flex" : "none";
     $("kasir").style.display = (m === "KELUAR" && ($("kNama").textContent || keranjang.length)) ? "block" : "none";
+    $("boxImpor").style.display = m === "MASUK" ? "block" : "none";     // faktur: impor foto, bukan kamera langsung
+    document.querySelector(".acts").style.display = m === "MASUK" ? "none" : "";
+    if (m === "MASUK") pesan("Mode faktur: impor foto di bawah");
   }
   $("mKeluar").onclick = function () { setMode("KELUAR"); };
   $("mMasuk").onclick = function () { setMode("MASUK"); };
@@ -320,6 +339,7 @@ function createDetector(cfg) {
   }
   function putaran() {
     if (jeda) { pesan("⏸ Dijeda"); return; }
+    if (mode === "MASUK") return;                       // faktur lewat impor foto; kamera tidak mengirim apa pun
     var th = ambilKecil(); if (!th) return;
     thTerakhir = th;
     var info = det.feed(th, Date.now(), sibuk);
@@ -371,6 +391,77 @@ function createDetector(cfg) {
       })
       .then(function () { sibuk = false; });
   }
+
+
+  // ---- impor foto faktur ----
+  var impor = [];   // [{url, base64}]
+  function perkecilFaktur(file) {
+    return new Promise(function (res, rej) {
+      var r = new FileReader();
+      r.onerror = function () { rej(new Error("Gagal membaca file")); };
+      r.onload = function () {
+        var img = new Image();
+        img.onerror = function () { rej(new Error("File bukan gambar")); };
+        img.onload = function () {
+          var sk = Math.min(1, 2400 / Math.max(img.width, img.height));
+          var c = document.createElement("canvas"); c.width = Math.round(img.width * sk); c.height = Math.round(img.height * sk);
+          var g = c.getContext("2d");
+          if ("filter" in g) g.filter = "grayscale(1) contrast(1.25)";
+          g.drawImage(img, 0, 0, c.width, c.height);
+          var u = c.toDataURL("image/jpeg", 0.85);
+          res({ url: u, base64: u.split(",")[1] });
+        };
+        img.src = r.result;
+      };
+      r.readAsDataURL(file);
+    });
+  }
+  $("fImpor").onchange = function () {
+    var arr = Array.prototype.slice.call(this.files); this.value = "";
+    $("impStatus").textContent = "Memproses foto…";
+    Promise.all(arr.map(perkecilFaktur)).then(function (hasil) {
+      hasil.forEach(function (h) {
+        impor.push(h);
+        var im = document.createElement("img"); im.src = h.url; im.style.cssText = "width:64px;height:64px;object-fit:cover;border-radius:8px";
+        $("impThumbs").appendChild(im);
+      });
+      $("impKirim").disabled = impor.length === 0;
+      $("impKirim").textContent = "Kirim " + impor.length + " foto";
+      $("impStatus").textContent = "";
+    }).catch(function (e) { $("impStatus").innerHTML = '<span class="err">' + esc(e.message) + '</span>'; });
+  };
+  function resetImpor() { impor = []; $("impThumbs").innerHTML = ""; $("impKirim").disabled = true; $("impKirim").textContent = "Kirim faktur"; }
+  $("impKirim").onclick = function () {
+    if (!impor.length) return;
+    var gabung = $("gabung").checked, paket = impor.slice(), badan;
+    if (gabung && paket.length > 6) { $("impStatus").innerHTML = '<span class="err">Maksimal 6 foto per faktur. Kurangi atau hilangkan centang "satu faktur".</span>'; return; }
+    var kelompok = gabung ? [paket.map(function (x) { return x.base64; })] : paket.map(function (x) { return x.base64; });
+    resetImpor();
+    var pin = $("pin").value || baca("pin"), mulai = Date.now();
+    kelompok.reduce(function (rantai, isi, i) {
+      return rantai.then(function () {
+        urutan++; var no = urutan;
+        $("impStatus").textContent = "Membaca faktur " + (i + 1) + " dari " + kelompok.length + "…";
+        return kirim({ pin: pin, mode: "MASUK", base64: isi, mime: "image/jpeg", qty: 0, kosong: true }).then(function (r) {
+          var h = '<div class="hasil"><b>#' + no + ' faktur' + (Array.isArray(isi) && isi.length > 1 ? ' (' + isi.length + ' foto digabung)' : '') + ':</b> <span class="' + (r.ok ? "ok" : "err") + '">' + esc(r.pesan) + '</span>';
+          (r.items || []).forEach(function (it) {
+            var terapkan = it.status === "✔ Diterapkan";
+            h += '<div>• ' + esc(it.nama) + ' × ' + it.jumlah + ' ' +
+              (terapkan ? '<span class="tag ok">✔ masuk stok — ' + esc(it.cocok) + '</span>'
+                : it.cocok ? '<span class="tag warn">→ ' + esc(it.cocok) + ' (' + Math.round(it.skor * 100) + '%) — setujui di Antrian Foto</span>'
+                : '<span class="tag warn">belum cocok — pilih manual di Antrian Foto</span>') + '</div>';
+          });
+          $("hasil").insertAdjacentHTML("afterbegin", h + "</div>"); $("hasilCard").style.display = "block";
+          bunyi(r.ok);
+        }).catch(function (e) {
+          $("hasil").insertAdjacentHTML("afterbegin", '<div class="hasil"><b>#' + no + ' faktur:</b> <span class="err">' + esc(e.message) + '</span></div>');
+          $("hasilCard").style.display = "block"; bunyi(false);
+        });
+      });
+    }, Promise.resolve()).then(function () {
+      $("impStatus").textContent = "Selesai (" + ((Date.now() - mulai) / 1000).toFixed(1) + " dtk). Cek & setujui di sheet Antrian Foto.";
+    });
+  };
 
   $("btnAmbil").onclick = function () { if (thTerakhir) det.paksa(thTerakhir, Date.now()); ambilDanKirim(true); };   // tombol manual = kehendak kasir, tanpa penjaga dobel
   $("btnJeda").onclick = function () { jeda = !jeda; $("btnJeda").textContent = jeda ? "▶ Lanjut" : "⏸ Jeda"; if (!jeda) pesan("Arahkan obat ke kamera"); };
